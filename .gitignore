@@ -1,0 +1,36 @@
+# Built output
+build/
+app/build/
+
+# Gradle wrapper
+.gradle/
+gradle-wrapper.jar
+
+# Local configuration
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Android Studio captures
+captures/
+
+# Keystore files
+*.keystore
+*.jks
+
+# Proguard
+proguard/
+
+# Google Services (keep in VCS only if you redact secrets)
+google-services.json
+
+# Navigation editor temp files
+.navigation/
+
+# OS
+.DS_Store
+Thumbs.db

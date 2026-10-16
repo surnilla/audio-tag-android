@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">audio-tag-android</string>
+    <string name="app_name_display">AudioTag Messenger</string>
+
+    <!-- Input -->
+    <string name="hint_message">Type your message…</string>
+
+    <!-- Buttons -->
+    <string name="btn_send">Send Message</string>
+    <string name="btn_reset">Start Over</string>
+
+    <!-- Status messages -->
+    <string name="status_idle">Ready to send.</string>
+    <string name="status_converting">Converting text to audio…</string>
+    <string name="status_scanning">Scanning for AudioTag device…</string>
+    <string name="status_connecting">Connecting to AudioTag…</string>
+    <string name="status_sending">Sending audio… chunk %1$d of %2$d</string>
+    <string name="status_waiting_ack">Playing on device — waiting for confirmation…</string>
+    <string name="status_delivered">Audio delivered and played successfully!</string>
+    <string name="status_error">Error: %1$s</string>
+
+    <!-- Validation -->
+    <string name="error_empty_message">Please enter a message.</string>
+
+    <!-- Permissions -->
+    <string name="perm_rationale_ble">Bluetooth permission is required to communicate with the AudioTag device.</string>
+    <string name="perm_rationale_location">Location permission is required for Bluetooth scanning on this Android version.</string>
+</resources>

@@ -1,0 +1,150 @@
+package com.audiotag.app
+
+import android.annotation.SuppressLint
+import android.app.Application
+import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.util.Log
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.audiotag.app.audio.TtsConverter
+import com.audiotag.app.ble.AudioTagBleManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+sealed class UiState {
+    object Idle : UiState()
+    object ConvertingTts : UiState()
+    object Scanning : UiState()
+    object Connecting : UiState()
+    data class Sending(val progress: Int, val total: Int) : UiState()
+    object WaitingForAck : UiState()
+    object Delivered : UiState()
+    data class Error(val message: String) : UiState()
+}
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        private const val TAG = "MainViewModel"
+    }
+
+    private val _uiState = MutableStateFlow<UiState>(UiState.Idle)
+    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    private val ttsConverter = TtsConverter(application)
+    private var bleManager: AudioTagBleManager? = null
+
+    @SuppressLint("MissingPermission")
+    fun sendMessage(text: String) {
+        if (text.isBlank()) {
+            _uiState.value = UiState.Error("Please enter a message to send.")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                // --- Step 1: Convert text to PCM ---
+                _uiState.value = UiState.ConvertingTts
+                Log.d(TAG, "Converting TTS for: $text")
+                val pcmData = withContext(Dispatchers.IO) {
+                    ttsConverter.textToPcm(text)
+                }
+                Log.d(TAG, "PCM size: ${pcmData.size} bytes")
+
+                // --- Step 2: Scan for AudioTag ---
+                _uiState.value = UiState.Scanning
+                val device = withContext(Dispatchers.IO) {
+                    scanForDevice()
+                }
+                Log.d(TAG, "Found device: ${device.address}")
+
+                // --- Step 3: Connect ---
+                _uiState.value = UiState.Connecting
+                val manager = AudioTagBleManager(getApplication())
+                bleManager = manager
+
+                withContext(Dispatchers.IO) {
+                    manager.connect(device)
+                }
+                Log.d(TAG, "Connected and services discovered")
+
+                // --- Step 4: Send audio chunks ---
+                withContext(Dispatchers.IO) {
+                    manager.sendAudio(pcmData) { chunkIndex, total ->
+                        // Post to main thread
+                        _uiState.value = UiState.Sending(chunkIndex + 1, total)
+                    }
+                }
+
+                // --- Step 5: Wait for playback done acknowledgement ---
+                _uiState.value = UiState.WaitingForAck
+                withContext(Dispatchers.IO) {
+                    manager.waitForDone()
+                }
+
+                // --- Step 6: Delivered ---
+                _uiState.value = UiState.Delivered
+                Log.d(TAG, "Audio delivered and acknowledged")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "sendMessage failed", e)
+                _uiState.value = UiState.Error(e.message ?: "Unknown error")
+            } finally {
+                bleManager?.disconnect()
+                bleManager = null
+            }
+        }
+    }
+
+    fun reset() {
+        bleManager?.disconnect()
+        bleManager = null
+        _uiState.value = UiState.Idle
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun scanForDevice(): android.bluetooth.BluetoothDevice {
+        val bluetoothManager =
+            getApplication<Application>().getSystemService(Context.BLUETOOTH_SERVICE)
+                    as BluetoothManager
+        val bluetoothAdapter = bluetoothManager.adapter
+            ?: throw IllegalStateException("Bluetooth is not available on this device")
+
+        if (!bluetoothAdapter.isEnabled) {
+            throw IllegalStateException("Bluetooth is disabled. Please enable Bluetooth and try again.")
+        }
+
+        val scanner = bluetoothAdapter.bluetoothLeScanner
+            ?: throw IllegalStateException("BLE scanner not available — is Bluetooth enabled?")
+
+        return suspendCancellableCoroutine { cont ->
+            val tempManager = AudioTagBleManager(getApplication())
+
+            tempManager.onError = { msg ->
+                if (cont.isActive) cont.resumeWithException(IllegalStateException(msg))
+            }
+
+            tempManager.scan(scanner) { device ->
+                if (cont.isActive) cont.resume(device)
+            }
+
+            cont.invokeOnCancellation {
+                // Scanner will be stopped by the onDeviceFound callback;
+                // nothing extra needed here.
+            }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        bleManager?.disconnect()
+    }
+}

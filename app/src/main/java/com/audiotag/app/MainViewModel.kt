@@ -21,6 +21,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import android.media.AudioTrack as AT
 
 sealed class UiState {
     object Idle : UiState()
@@ -133,7 +134,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun playPcmOnSpeaker(pcmData: ByteArray) {
+    private suspend fun playPcmOnSpeaker(pcmData: ByteArray) {
+        val totalSamples = pcmData.size / 2  // 16-bit = 2 bytes per sample
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -151,13 +153,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .setBufferSizeInBytes(pcmData.size)
             .setTransferMode(AudioTrack.MODE_STATIC)
             .build()
-        track.write(pcmData, 0, pcmData.size)
-        track.play()
-        // Block until playback finishes
-        while (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-            Thread.sleep(50)
+
+        suspendCancellableCoroutine { cont ->
+            track.setNotificationMarkerPosition(totalSamples)
+            track.setPlaybackPositionUpdateListener(object : AT.OnPlaybackPositionUpdateListener {
+                override fun onMarkerReached(t: AT) {
+                    t.release()
+                    if (cont.isActive) cont.resume(Unit)
+                }
+                override fun onPeriodicNotification(t: AT) {}
+            })
+            track.write(pcmData, 0, pcmData.size)
+            track.play()
+            cont.invokeOnCancellation { track.release() }
         }
-        track.release()
     }
 
     fun reset() {

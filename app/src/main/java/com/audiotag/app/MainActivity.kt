@@ -67,6 +67,16 @@ class MainActivity : AppCompatActivity() {
             viewModel.sendMessage(text)
         }
 
+        binding.btnTestLocally.setOnClickListener {
+            val text = binding.etMessage.text?.toString()?.trim() ?: ""
+            if (text.isEmpty()) {
+                binding.etMessage.error = getString(R.string.error_empty_message)
+                return@setOnClickListener
+            }
+            hideKeyboard()
+            viewModel.testLocally(text)
+        }
+
         binding.btnReset.setOnClickListener {
             viewModel.reset()
         }
@@ -92,24 +102,35 @@ class MainActivity : AppCompatActivity() {
                 binding.tvStatus.text = getString(R.string.status_idle)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
                 binding.btnSend.isEnabled = true
+                binding.btnTestLocally.isEnabled = true
             }
 
             is UiState.ConvertingTts -> {
                 binding.tvStatus.text = getString(R.string.status_converting)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
                 binding.btnSend.isEnabled = false
+                binding.btnTestLocally.isEnabled = false
+            }
+
+            is UiState.PlayingLocally -> {
+                binding.tvStatus.text = getString(R.string.status_playing_locally)
+                binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
+                binding.btnSend.isEnabled = false
+                binding.btnTestLocally.isEnabled = false
             }
 
             is UiState.Scanning -> {
                 binding.tvStatus.text = getString(R.string.status_scanning)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
                 binding.btnSend.isEnabled = false
+                binding.btnTestLocally.isEnabled = false
             }
 
             is UiState.Connecting -> {
                 binding.tvStatus.text = getString(R.string.status_connecting)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
                 binding.btnSend.isEnabled = false
+                binding.btnTestLocally.isEnabled = false
             }
 
             is UiState.Sending -> {
@@ -123,18 +144,21 @@ class MainActivity : AppCompatActivity() {
                 )
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
                 binding.btnSend.isEnabled = false
+                binding.btnTestLocally.isEnabled = false
             }
 
             is UiState.WaitingForAck -> {
                 binding.tvStatus.text = getString(R.string.status_waiting_ack)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
                 binding.btnSend.isEnabled = false
+                binding.btnTestLocally.isEnabled = false
             }
 
             is UiState.Delivered -> {
                 binding.tvStatus.text = getString(R.string.status_delivered)
                 binding.tvStatus.setTextColor(getColor(android.R.color.holo_green_dark))
                 binding.btnSend.isEnabled = true
+                binding.btnTestLocally.isEnabled = true
                 binding.btnReset.visibility = View.VISIBLE
             }
 
@@ -142,6 +166,7 @@ class MainActivity : AppCompatActivity() {
                 binding.tvStatus.text = getString(R.string.status_error, state.message)
                 binding.tvStatus.setTextColor(getColor(android.R.color.holo_red_dark))
                 binding.btnSend.isEnabled = true
+                binding.btnTestLocally.isEnabled = true
                 binding.btnReset.visibility = View.VISIBLE
             }
         }

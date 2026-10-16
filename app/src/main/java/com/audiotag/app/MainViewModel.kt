@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -22,6 +25,7 @@ import kotlin.coroutines.resumeWithException
 sealed class UiState {
     object Idle : UiState()
     object ConvertingTts : UiState()
+    object PlayingLocally : UiState()
     object Scanning : UiState()
     object Connecting : UiState()
     data class Sending(val progress: Int, val total: Int) : UiState()
@@ -102,6 +106,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 bleManager = null
             }
         }
+    }
+
+    fun testLocally(text: String) {
+        if (text.isBlank()) {
+            _uiState.value = UiState.Error("Please enter a message to test.")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                _uiState.value = UiState.ConvertingTts
+                val pcmData = withContext(Dispatchers.IO) {
+                    ttsConverter.textToPcm(text)
+                }
+                Log.d(TAG, "Local test: PCM size ${pcmData.size} bytes")
+
+                _uiState.value = UiState.PlayingLocally
+                withContext(Dispatchers.IO) {
+                    playPcmOnSpeaker(pcmData)
+                }
+                _uiState.value = UiState.Idle
+            } catch (e: Exception) {
+                Log.e(TAG, "testLocally failed", e)
+                _uiState.value = UiState.Error(e.message ?: "Playback failed")
+            }
+        }
+    }
+
+    private fun playPcmOnSpeaker(pcmData: ByteArray) {
+        val track = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(TtsConverter.TARGET_SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            )
+            .setBufferSizeInBytes(pcmData.size)
+            .setTransferMode(AudioTrack.MODE_STATIC)
+            .build()
+        track.write(pcmData, 0, pcmData.size)
+        track.play()
+        // Block until playback finishes
+        while (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+            Thread.sleep(50)
+        }
+        track.release()
     }
 
     fun reset() {

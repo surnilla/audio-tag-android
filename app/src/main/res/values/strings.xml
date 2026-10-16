@@ -7,7 +7,8 @@
     <string name="hint_message">Type your message…</string>
 
     <!-- Buttons -->
-    <string name="btn_send">Send Message</string>
+    <string name="btn_send">Send via BLE</string>
+    <string name="btn_test_locally">Test Locally (Speaker)</string>
     <string name="btn_reset">Start Over</string>
 
     <!-- Status messages -->
@@ -17,6 +18,7 @@
     <string name="status_connecting">Connecting to AudioTag…</string>
     <string name="status_sending">Sending audio… chunk %1$d of %2$d</string>
     <string name="status_waiting_ack">Playing on device — waiting for confirmation…</string>
+    <string name="status_playing_locally">Playing on phone speaker…</string>
     <string name="status_delivered">Audio delivered and played successfully!</string>
     <string name="status_error">Error: %1$s</string>
 

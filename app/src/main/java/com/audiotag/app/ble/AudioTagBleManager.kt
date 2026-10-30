@@ -25,10 +25,11 @@ class AudioTagBleManager(private val context: Context) {
     companion object {
         private const val TAG = "AudioTagBleManager"
 
-        val SERVICE_UUID: UUID = UUID.fromString("12345678-1234-1234-1234-1234567890AB")
+        val SERVICE_UUID: UUID    = UUID.fromString("12345678-1234-1234-1234-1234567890AB")
         val AUDIO_DATA_UUID: UUID = UUID.fromString("12345678-1234-1234-1234-1234567890AC")
-        val CLIP_SELECT_UUID: UUID = UUID.fromString("12345678-1234-1234-1234-1234567890AD")
-        val STATUS_UUID: UUID = UUID.fromString("12345678-1234-1234-1234-1234567890AE")
+        val TTS_UUID: UUID        = UUID.fromString("12345678-1234-1234-1234-1234567890AD")
+        val STATUS_UUID: UUID     = UUID.fromString("12345678-1234-1234-1234-1234567890AE")
+        val MIC_DATA_UUID: UUID   = UUID.fromString("12345678-1234-1234-1234-1234567890AF")
 
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
@@ -40,6 +41,8 @@ class AudioTagBleManager(private val context: Context) {
     var onConnected: (() -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    var onStatusReceived: ((Byte) -> Unit)? = null
+    var onMicDataReceived: ((ByteArray) -> Unit)? = null
 
     private var gatt: BluetoothGatt? = null
     private var negotiatedMtu: Int = 23  // BLE default
@@ -49,6 +52,14 @@ class AudioTagBleManager(private val context: Context) {
     private var writeContinuation: CancellableContinuation<Unit>? = null
     private var descriptorContinuation: CancellableContinuation<Unit>? = null
     private var statusContinuation: CancellableContinuation<Unit>? = null
+
+    // MIC_DATA reassembly state
+    private var micBuf: ByteArray? = null
+    private var micTotal: Int = 0
+    private var micReceived: Int = 0
+
+    // Cached MIC_DATA characteristic for CCCD chaining in connect flow
+    private var micDataChar: BluetoothGattCharacteristic? = null
 
     // ---------------------------------------------------------------------------
     // Scan
@@ -92,7 +103,7 @@ class AudioTagBleManager(private val context: Context) {
     }
 
     // ---------------------------------------------------------------------------
-    // Send audio
+    // Send audio (raw PCM)
     // ---------------------------------------------------------------------------
 
     suspend fun sendAudio(pcmData: ByteArray, onProgress: (Int, Int) -> Unit) {
@@ -111,7 +122,6 @@ class AudioTagBleManager(private val context: Context) {
         val firstPayloadLen = minOf(firstPayloadCapacity, pcmData.size)
 
         val firstChunk = ByteArray(headerSize + firstPayloadLen)
-        // Write 4-byte LE length
         val len = pcmData.size
         firstChunk[0] = (len and 0xFF).toByte()
         firstChunk[1] = ((len shr 8) and 0xFF).toByte()
@@ -119,7 +129,6 @@ class AudioTagBleManager(private val context: Context) {
         firstChunk[3] = ((len shr 24) and 0xFF).toByte()
         System.arraycopy(pcmData, 0, firstChunk, headerSize, firstPayloadLen)
 
-        // Build remaining chunks
         val chunks = mutableListOf(firstChunk)
         var offset = firstPayloadLen
         while (offset < pcmData.size) {
@@ -139,14 +148,25 @@ class AudioTagBleManager(private val context: Context) {
     }
 
     // ---------------------------------------------------------------------------
+    // Send text (→ Flite TTS on device)
+    // ---------------------------------------------------------------------------
+
+    suspend fun sendText(text: String) {
+        val g = gatt ?: throw IllegalStateException("Not connected")
+        val service = g.getService(SERVICE_UUID)
+            ?: throw IllegalStateException("AudioTag service not found")
+        val characteristic = service.getCharacteristic(TTS_UUID)
+            ?: throw IllegalStateException("TTS characteristic not found")
+        writeCharacteristic(g, characteristic, text.toByteArray(Charsets.UTF_8))
+    }
+
+    // ---------------------------------------------------------------------------
     // Wait for playback done (status 0x02)
     // ---------------------------------------------------------------------------
 
     suspend fun waitForDone() {
         suspendCancellableCoroutine<Unit> { cont ->
             statusContinuation = cont
-            // If already in the right state, the continuation will be resumed
-            // by onCharacteristicChanged.
         }
     }
 
@@ -254,7 +274,6 @@ class AudioTagBleManager(private val context: Context) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 negotiatedMtu = mtu
             }
-            // Proceed to service discovery regardless of MTU negotiation result
             gatt.discoverServices()
         }
 
@@ -295,14 +314,18 @@ class AudioTagBleManager(private val context: Context) {
                 return
             }
 
-            // Enable notifications on the status characteristic
-            val notifEnabled = gatt.setCharacteristicNotification(statusChar, true)
-            Log.d(TAG, "setCharacteristicNotification: $notifEnabled")
+            // Cache MIC_DATA characteristic for CCCD chaining
+            micDataChar = service.getCharacteristic(MIC_DATA_UUID)
 
+            // Enable local notifications for both characteristics
+            gatt.setCharacteristicNotification(statusChar, true)
+            micDataChar?.let { gatt.setCharacteristicNotification(it, true) }
+
+            // Write CCCD for STATUS first; MIC_DATA CCCD will be written in onDescriptorWrite
             val cccd = statusChar.getDescriptor(CCCD_UUID)
             if (cccd == null) {
-                // No CCCD — resume anyway, notifications might still work on some devices
-                Log.w(TAG, "CCCD descriptor not found — skipping descriptor write")
+                // No CCCD — skip straight to done
+                Log.w(TAG, "STATUS CCCD descriptor not found — skipping")
                 val cont = connectContinuation
                 connectContinuation = null
                 if (cont != null && cont.isActive) {
@@ -312,8 +335,6 @@ class AudioTagBleManager(private val context: Context) {
                 return
             }
 
-            // Write CCCD to enable notifications; we'll resume connectContinuation in
-            // onDescriptorWrite once this completes.
             val enableValue = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             val writeResult = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeDescriptor(cccd, enableValue)
@@ -325,9 +346,9 @@ class AudioTagBleManager(private val context: Context) {
             }
 
             if (writeResult != BluetoothGatt.GATT_SUCCESS) {
-                Log.w(TAG, "writeDescriptor for CCCD initiation returned: $writeResult")
+                Log.w(TAG, "STATUS CCCD write initiation returned: $writeResult")
             }
-            // Actual resume happens in onDescriptorWrite
+            // Chain continues in onDescriptorWrite
         }
 
         override fun onDescriptorWrite(
@@ -335,9 +356,9 @@ class AudioTagBleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            Log.d(TAG, "onDescriptorWrite: status=$status uuid=${descriptor.uuid}")
+            Log.d(TAG, "onDescriptorWrite: status=$status uuid=${descriptor.uuid} char=${descriptor.characteristic?.uuid}")
 
-            // Check if this is a pending descriptor write from sendAudio flow
+            // If a descriptor write was issued from the sendAudio flow, handle it first
             val descCont = descriptorContinuation
             if (descCont != null && descCont.isActive) {
                 descriptorContinuation = null
@@ -351,7 +372,47 @@ class AudioTagBleManager(private val context: Context) {
                 return
             }
 
-            // Otherwise this is from the connect flow (CCCD write)
+            // Connect-flow CCCD writes — chain STATUS → MIC_DATA → resume
+            val charUuid = descriptor.characteristic?.uuid
+            when (charUuid) {
+                STATUS_UUID -> {
+                    // STATUS CCCD written; now write MIC_DATA CCCD if available
+                    val mic = micDataChar
+                    val micCccd = mic?.getDescriptor(CCCD_UUID)
+                    if (mic != null && micCccd != null) {
+                        val enableValue = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        val writeResult = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            gatt.writeDescriptor(micCccd, enableValue)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            micCccd.value = enableValue
+                            @Suppress("DEPRECATION")
+                            if (gatt.writeDescriptor(micCccd)) BluetoothGatt.GATT_SUCCESS else -1
+                        }
+                        if (writeResult == BluetoothGatt.GATT_SUCCESS) {
+                            Log.d(TAG, "MIC_DATA CCCD write initiated")
+                            return  // Wait for MIC_DATA onDescriptorWrite
+                        }
+                        Log.w(TAG, "MIC_DATA CCCD write initiation failed: $writeResult — resuming anyway")
+                    }
+                    // No MIC_DATA char or CCCD write failed — resume connect
+                    resumeConnect(status)
+                }
+                MIC_DATA_UUID -> {
+                    // MIC_DATA CCCD written — connection fully set up
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        Log.w(TAG, "MIC_DATA CCCD write failed: $status — continuing anyway")
+                    }
+                    resumeConnect(BluetoothGatt.GATT_SUCCESS)
+                }
+                else -> {
+                    // Unknown descriptor (shouldn't happen) — resume with original status
+                    resumeConnect(status)
+                }
+            }
+        }
+
+        private fun resumeConnect(status: Int) {
             val cont = connectContinuation
             connectContinuation = null
             if (cont != null && cont.isActive) {
@@ -391,7 +452,7 @@ class AudioTagBleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic
         ) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                handleStatusNotification(characteristic.uuid, characteristic.value)
+                dispatchNotification(characteristic.uuid, characteristic.value)
             }
         }
 
@@ -400,20 +461,60 @@ class AudioTagBleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            handleStatusNotification(characteristic.uuid, value)
+            dispatchNotification(characteristic.uuid, value)
         }
     }
 
-    private fun handleStatusNotification(uuid: UUID, value: ByteArray) {
-        if (uuid != STATUS_UUID) return
+    private fun dispatchNotification(uuid: UUID, value: ByteArray) {
+        when (uuid) {
+            STATUS_UUID   -> handleStatusNotification(value)
+            MIC_DATA_UUID -> handleMicDataNotification(value)
+        }
+    }
+
+    private fun handleStatusNotification(value: ByteArray) {
         val statusByte = value.firstOrNull() ?: return
-        Log.d(TAG, "Status notification: 0x${statusByte.toString(16)}")
+        Log.d(TAG, "Status notification: 0x${statusByte.toInt().and(0xFF).toString(16)}")
+        onStatusReceived?.invoke(statusByte)
         if (statusByte == 0x02.toByte()) {
             val cont = statusContinuation
             statusContinuation = null
             if (cont != null && cont.isActive) {
                 cont.resume(Unit)
             }
+        }
+    }
+
+    private fun handleMicDataNotification(value: ByteArray) {
+        if (micBuf == null) {
+            // First notification: 4-byte LE total length header
+            if (value.size < 4) return
+            micTotal = (value[0].toInt() and 0xFF) or
+                       ((value[1].toInt() and 0xFF) shl 8) or
+                       ((value[2].toInt() and 0xFF) shl 16) or
+                       ((value[3].toInt() and 0xFF) shl 24)
+            if (micTotal <= 0) return
+            micBuf = ByteArray(micTotal)
+            micReceived = 0
+            val payload = value.size - 4
+            if (payload > 0) {
+                val copy = minOf(payload, micTotal)
+                System.arraycopy(value, 4, micBuf!!, 0, copy)
+                micReceived = copy
+            }
+            Log.d(TAG, "MIC_DATA start: total=$micTotal, first chunk payload=$micReceived")
+        } else {
+            val space = micTotal - micReceived
+            val copy = minOf(value.size, space)
+            System.arraycopy(value, 0, micBuf!!, micReceived, copy)
+            micReceived += copy
+        }
+
+        if (micReceived >= micTotal) {
+            val data = micBuf!!.copyOf(micTotal)
+            micBuf = null; micTotal = 0; micReceived = 0
+            Log.d(TAG, "MIC_DATA complete: ${data.size} bytes")
+            onMicDataReceived?.invoke(data)
         }
     }
 }

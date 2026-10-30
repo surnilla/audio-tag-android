@@ -77,6 +77,16 @@ class MainActivity : AppCompatActivity() {
             viewModel.testLocally(text)
         }
 
+        binding.btnListen.setOnClickListener {
+            hideKeyboard()
+            viewModel.startListeningForPtt()
+        }
+
+        binding.btnSendResult.setOnClickListener {
+            val text = binding.tvSpeechResult.text?.toString() ?: ""
+            viewModel.sendTextToDevice(text)
+        }
+
         binding.btnReset.setOnClickListener {
             viewModel.reset()
         }
@@ -93,44 +103,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUi(state: UiState) {
-        // Default visibility
+        // Default: hide transient controls
         binding.progressBar.visibility = View.GONE
         binding.btnReset.visibility = View.GONE
+        binding.tvSpeechResultLabel.visibility = View.GONE
+        binding.tvSpeechResult.visibility = View.GONE
+        binding.btnSendResult.visibility = View.GONE
 
         when (state) {
             is UiState.Idle -> {
                 binding.tvStatus.text = getString(R.string.status_idle)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
-                binding.btnSend.isEnabled = true
-                binding.btnTestLocally.isEnabled = true
+                setInputEnabled(true)
             }
 
             is UiState.ConvertingTts -> {
                 binding.tvStatus.text = getString(R.string.status_converting)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
-                binding.btnSend.isEnabled = false
-                binding.btnTestLocally.isEnabled = false
+                setInputEnabled(false)
             }
 
             is UiState.PlayingLocally -> {
                 binding.tvStatus.text = getString(R.string.status_playing_locally)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
-                binding.btnSend.isEnabled = false
-                binding.btnTestLocally.isEnabled = false
+                setInputEnabled(false)
             }
 
             is UiState.Scanning -> {
                 binding.tvStatus.text = getString(R.string.status_scanning)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
-                binding.btnSend.isEnabled = false
-                binding.btnTestLocally.isEnabled = false
+                setInputEnabled(false)
             }
 
             is UiState.Connecting -> {
                 binding.tvStatus.text = getString(R.string.status_connecting)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
-                binding.btnSend.isEnabled = false
-                binding.btnTestLocally.isEnabled = false
+                setInputEnabled(false)
             }
 
             is UiState.Sending -> {
@@ -143,33 +151,72 @@ class MainActivity : AppCompatActivity() {
                     state.total
                 )
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
-                binding.btnSend.isEnabled = false
-                binding.btnTestLocally.isEnabled = false
+                setInputEnabled(false)
             }
 
             is UiState.WaitingForAck -> {
                 binding.tvStatus.text = getString(R.string.status_waiting_ack)
                 binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
-                binding.btnSend.isEnabled = false
-                binding.btnTestLocally.isEnabled = false
+                setInputEnabled(false)
             }
 
             is UiState.Delivered -> {
                 binding.tvStatus.text = getString(R.string.status_delivered)
                 binding.tvStatus.setTextColor(getColor(android.R.color.holo_green_dark))
-                binding.btnSend.isEnabled = true
-                binding.btnTestLocally.isEnabled = true
+                setInputEnabled(true)
                 binding.btnReset.visibility = View.VISIBLE
+            }
+
+            // --- PTT states ---
+
+            is UiState.WaitingForPtt -> {
+                binding.tvStatus.text = getString(R.string.status_waiting_ptt)
+                binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
+                setInputEnabled(false)
+            }
+
+            is UiState.RecordingOnDevice -> {
+                binding.tvStatus.text = getString(R.string.status_recording_device)
+                binding.tvStatus.setTextColor(getColor(android.R.color.holo_orange_dark))
+                setInputEnabled(false)
+            }
+
+            is UiState.ReceivingMicAudio -> {
+                binding.tvStatus.text = getString(R.string.status_receiving_mic)
+                binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
+                setInputEnabled(false)
+            }
+
+            is UiState.RecognizingSpeech -> {
+                binding.tvStatus.text = getString(R.string.status_recognizing)
+                binding.tvStatus.setTextColor(getColor(android.R.color.darker_gray))
+                setInputEnabled(false)
+            }
+
+            is UiState.SpeechResult -> {
+                binding.tvStatus.text = getString(R.string.status_speech_done)
+                binding.tvStatus.setTextColor(getColor(android.R.color.holo_green_dark))
+                binding.tvSpeechResultLabel.visibility = View.VISIBLE
+                binding.tvSpeechResult.visibility = View.VISIBLE
+                binding.tvSpeechResult.text = state.text
+                binding.btnSendResult.visibility = View.VISIBLE
+                binding.btnReset.visibility = View.VISIBLE
+                setInputEnabled(true)
             }
 
             is UiState.Error -> {
                 binding.tvStatus.text = getString(R.string.status_error, state.message)
                 binding.tvStatus.setTextColor(getColor(android.R.color.holo_red_dark))
-                binding.btnSend.isEnabled = true
-                binding.btnTestLocally.isEnabled = true
+                setInputEnabled(true)
                 binding.btnReset.visibility = View.VISIBLE
             }
         }
+    }
+
+    private fun setInputEnabled(enabled: Boolean) {
+        binding.btnSend.isEnabled = enabled
+        binding.btnTestLocally.isEnabled = enabled
+        binding.btnListen.isEnabled = enabled
     }
 
     // ---------------------------------------------------------------------------

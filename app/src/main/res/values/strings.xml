@@ -9,6 +9,8 @@
     <!-- Buttons -->
     <string name="btn_send">Send via BLE</string>
     <string name="btn_test_locally">Test Locally (Speaker)</string>
+    <string name="btn_listen">Listen for PTT</string>
+    <string name="btn_send_result">Send to Device</string>
     <string name="btn_reset">Start Over</string>
 
     <!-- Status messages -->
@@ -20,6 +22,15 @@
     <string name="status_waiting_ack">Playing on device — waiting for confirmation…</string>
     <string name="status_playing_locally">Playing on phone speaker…</string>
     <string name="status_delivered">Audio delivered and played successfully!</string>
+    <!-- PTT states -->
+    <string name="status_waiting_ptt">Connected — press G41 on device to record…</string>
+    <string name="status_recording_device">Recording on device…</string>
+    <string name="status_receiving_mic">Receiving audio from device…</string>
+    <string name="status_recognizing">Recognizing speech…</string>
+    <string name="status_speech_done">Speech recognized!</string>
+    <!-- Speech result -->
+    <string name="label_speech_result">Recognized text:</string>
+    <!-- Error -->
     <string name="status_error">Error: %1$s</string>
 
     <!-- Validation -->

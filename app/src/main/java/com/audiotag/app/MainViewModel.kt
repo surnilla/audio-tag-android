@@ -10,6 +10,7 @@ import android.media.AudioTrack
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.audiotag.app.audio.SttConverter
 import com.audiotag.app.audio.TtsConverter
 import com.audiotag.app.ble.AudioTagBleManager
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,13 @@ sealed class UiState {
     data class Sending(val progress: Int, val total: Int) : UiState()
     object WaitingForAck : UiState()
     object Delivered : UiState()
+    // PTT / mic states
+    object WaitingForPtt : UiState()
+    object RecordingOnDevice : UiState()
+    object ReceivingMicAudio : UiState()
+    object RecognizingSpeech : UiState()
+    data class SpeechResult(val text: String) : UiState()
+
     data class Error(val message: String) : UiState()
 }
 
@@ -47,6 +55,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val ttsConverter = TtsConverter(application)
     private var bleManager: AudioTagBleManager? = null
 
+    // ---------------------------------------------------------------------------
+    // Send PCM audio to device
+    // ---------------------------------------------------------------------------
+
     @SuppressLint("MissingPermission")
     fun sendMessage(text: String) {
         if (text.isBlank()) {
@@ -56,7 +68,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                // --- Step 1: Convert text to PCM ---
                 _uiState.value = UiState.ConvertingTts
                 Log.d(TAG, "Converting TTS for: $text")
                 val pcmData = withContext(Dispatchers.IO) {
@@ -64,38 +75,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 Log.d(TAG, "PCM size: ${pcmData.size} bytes")
 
-                // --- Step 2: Scan for AudioTag ---
                 _uiState.value = UiState.Scanning
-                val device = withContext(Dispatchers.IO) {
-                    scanForDevice()
-                }
+                val device = withContext(Dispatchers.IO) { scanForDevice() }
                 Log.d(TAG, "Found device: ${device.address}")
 
-                // --- Step 3: Connect ---
                 _uiState.value = UiState.Connecting
                 val manager = AudioTagBleManager(getApplication())
                 bleManager = manager
 
-                withContext(Dispatchers.IO) {
-                    manager.connect(device)
-                }
+                withContext(Dispatchers.IO) { manager.connect(device) }
                 Log.d(TAG, "Connected and services discovered")
 
-                // --- Step 4: Send audio chunks ---
                 withContext(Dispatchers.IO) {
                     manager.sendAudio(pcmData) { chunkIndex, total ->
-                        // Post to main thread
                         _uiState.value = UiState.Sending(chunkIndex + 1, total)
                     }
                 }
 
-                // --- Step 5: Wait for playback done acknowledgement ---
                 _uiState.value = UiState.WaitingForAck
-                withContext(Dispatchers.IO) {
-                    manager.waitForDone()
-                }
+                withContext(Dispatchers.IO) { manager.waitForDone() }
 
-                // --- Step 6: Delivered ---
                 _uiState.value = UiState.Delivered
                 Log.d(TAG, "Audio delivered and acknowledged")
 
@@ -108,6 +107,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    // ---------------------------------------------------------------------------
+    // Send text → device Flite TTS
+    // ---------------------------------------------------------------------------
+
+    @SuppressLint("MissingPermission")
+    fun sendTextToDevice(text: String) {
+        if (text.isBlank()) {
+            _uiState.value = UiState.Error("No text to send.")
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                _uiState.value = UiState.Scanning
+                val device = withContext(Dispatchers.IO) { scanForDevice() }
+
+                _uiState.value = UiState.Connecting
+                val manager = AudioTagBleManager(getApplication())
+                bleManager = manager
+
+                withContext(Dispatchers.IO) { manager.connect(device) }
+
+                _uiState.value = UiState.WaitingForAck
+                withContext(Dispatchers.IO) {
+                    manager.sendText(text)
+                    manager.waitForDone()
+                }
+
+                _uiState.value = UiState.Delivered
+                Log.d(TAG, "Text delivered to device: $text")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "sendTextToDevice failed", e)
+                _uiState.value = UiState.Error(e.message ?: "Unknown error")
+            } finally {
+                bleManager?.disconnect()
+                bleManager = null
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // PTT listen: connect, wait for mic audio, run STT
+    // ---------------------------------------------------------------------------
+
+    @SuppressLint("MissingPermission")
+    fun startListeningForPtt() {
+        viewModelScope.launch {
+            try {
+                _uiState.value = UiState.Scanning
+                val device = withContext(Dispatchers.IO) { scanForDevice() }
+
+                _uiState.value = UiState.Connecting
+                val manager = AudioTagBleManager(getApplication())
+                bleManager = manager
+
+                // Listen for status updates to reflect recording state in UI
+                manager.onStatusReceived = { statusByte ->
+                    when (statusByte) {
+                        0x03.toByte() -> _uiState.value = UiState.RecordingOnDevice
+                        0x04.toByte() -> _uiState.value = UiState.ReceivingMicAudio
+                    }
+                }
+
+                withContext(Dispatchers.IO) { manager.connect(device) }
+                _uiState.value = UiState.WaitingForPtt
+
+                // Suspend until MIC_DATA notifications complete
+                val pcmData = withContext(Dispatchers.IO) {
+                    suspendCancellableCoroutine<ByteArray> { cont ->
+                        manager.onMicDataReceived = { data ->
+                            manager.onMicDataReceived = null
+                            if (cont.isActive) cont.resume(data)
+                        }
+                        cont.invokeOnCancellation {
+                            manager.onMicDataReceived = null
+                        }
+                    }
+                }
+
+                Log.d(TAG, "Mic PCM received: ${pcmData.size} bytes — running STT")
+                _uiState.value = UiState.RecognizingSpeech
+
+                val transcript = withContext(Dispatchers.IO) {
+                    SttConverter().recognize(pcmData)
+                }
+
+                _uiState.value = if (transcript.isNotBlank()) {
+                    UiState.SpeechResult(transcript)
+                } else {
+                    UiState.Error("No speech recognized")
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "startListeningForPtt failed", e)
+                _uiState.value = UiState.Error(e.message ?: "Unknown error")
+            } finally {
+                bleManager?.disconnect()
+                bleManager = null
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Local TTS test
+    // ---------------------------------------------------------------------------
 
     fun testLocally(text: String) {
         if (text.isBlank()) {
@@ -123,9 +229,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Log.d(TAG, "Local test: PCM size ${pcmData.size} bytes")
 
                 _uiState.value = UiState.PlayingLocally
-                withContext(Dispatchers.IO) {
-                    playPcmOnSpeaker(pcmData)
-                }
+                withContext(Dispatchers.IO) { playPcmOnSpeaker(pcmData) }
                 _uiState.value = UiState.Idle
             } catch (e: Exception) {
                 Log.e(TAG, "testLocally failed", e)
@@ -135,7 +239,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun playPcmOnSpeaker(pcmData: ByteArray) {
-        val totalSamples = pcmData.size / 2  // 16-bit = 2 bytes per sample
+        val totalSamples = pcmData.size / 2
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -169,11 +273,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Reset
+    // ---------------------------------------------------------------------------
+
     fun reset() {
         bleManager?.disconnect()
         bleManager = null
         _uiState.value = UiState.Idle
     }
+
+    override fun onCleared() {
+        super.onCleared()
+        bleManager?.disconnect()
+    }
+
+    // ---------------------------------------------------------------------------
+    // BLE device scan helper
+    // ---------------------------------------------------------------------------
 
     @SuppressLint("MissingPermission")
     private suspend fun scanForDevice(): android.bluetooth.BluetoothDevice {
@@ -202,14 +319,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             cont.invokeOnCancellation {
-                // Scanner will be stopped by the onDeviceFound callback;
-                // nothing extra needed here.
+                // Scanner stopped by onDeviceFound callback; nothing extra needed here.
             }
         }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        bleManager?.disconnect()
     }
 }

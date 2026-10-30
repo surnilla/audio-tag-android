@@ -21,6 +21,9 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="30" />
 
+    <!-- Internet for Cloud STT -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- TTS requires writing to cache -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />

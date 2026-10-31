@@ -2,11 +2,10 @@ package com.audiotag.app
 
 import android.annotation.SuppressLint
 import android.app.Application
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -14,313 +13,303 @@ import com.audiotag.app.audio.SttConverter
 import com.audiotag.app.audio.TtsConverter
 import com.audiotag.app.ble.AudioTagBleManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import android.media.AudioTrack as AT
+
+// workerLabel: short ID shown in the chat (last 4 hex chars of MAC, e.g. "A4B1")
+// null = message sent by the phone operator
+data class Message(val text: String, val fromWorker: Boolean, val workerLabel: String? = null)
 
 sealed class UiState {
-    object Idle : UiState()
-    object ConvertingTts : UiState()
-    object PlayingLocally : UiState()
-    object Scanning : UiState()
+    object Disconnected : UiState()
     object Connecting : UiState()
-    data class Sending(val progress: Int, val total: Int) : UiState()
-    object WaitingForAck : UiState()
-    object Delivered : UiState()
-    // PTT / mic states
-    object WaitingForPtt : UiState()
-    object RecordingOnDevice : UiState()
-    object ReceivingMicAudio : UiState()
-    object RecognizingSpeech : UiState()
-    data class SpeechResult(val text: String) : UiState()
-
+    data class Connected(
+        val messages: List<Message> = emptyList(),
+        val deviceStatus: String = ""
+    ) : UiState()
     data class Error(val message: String) : UiState()
 }
 
+@SuppressLint("MissingPermission")
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "MainViewModel"
+        const val MIC_SAMPLE_RATE = 8000
+        private const val SCAN_DURATION_MS = 10_000L
     }
 
-    private val _uiState = MutableStateFlow<UiState>(UiState.Idle)
+    private val _uiState = MutableStateFlow<UiState>(UiState.Disconnected)
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     private val ttsConverter = TtsConverter(application)
-    private var bleManager: AudioTagBleManager? = null
+    private val messages = mutableListOf<Message>()
+
+    // Map of device address → manager for all currently connected workers
+    private val managers = mutableMapOf<String, AudioTagBleManager>()
+    // Map of device address → current activity string (blank when idle)
+    private val workerStatuses = mutableMapOf<String, String>()
+
+    private var activeScanCallback: ScanCallback? = null
+    private var bleScanner: android.bluetooth.le.BluetoothLeScanner? = null
+
+    // true = phone converts text to PCM; false = device Flite TTS
+    val usePhoneVoice = MutableStateFlow(true)
 
     // ---------------------------------------------------------------------------
-    // Send PCM audio to device
+    // Connect — scan for SCAN_DURATION_MS, connect to every AudioTag found
     // ---------------------------------------------------------------------------
 
-    @SuppressLint("MissingPermission")
-    fun sendMessage(text: String) {
-        if (text.isBlank()) {
-            _uiState.value = UiState.Error("Please enter a message to send.")
-            return
-        }
-
+    fun connect() {
+        if (_uiState.value is UiState.Connecting) return
         viewModelScope.launch {
-            try {
-                _uiState.value = UiState.ConvertingTts
-                Log.d(TAG, "Converting TTS for: $text")
-                val pcmData = withContext(Dispatchers.IO) {
-                    ttsConverter.textToPcm(text)
-                }
-                Log.d(TAG, "PCM size: ${pcmData.size} bytes")
+            _uiState.value = UiState.Connecting
 
-                _uiState.value = UiState.Scanning
-                val device = withContext(Dispatchers.IO) { scanForDevice() }
-                Log.d(TAG, "Found device: ${device.address}")
+            val btManager = getApplication<Application>()
+                .getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+            val adapter = btManager.adapter ?: run {
+                _uiState.value = UiState.Error("Bluetooth not available")
+                return@launch
+            }
+            if (!adapter.isEnabled) {
+                _uiState.value = UiState.Error("Bluetooth is disabled")
+                return@launch
+            }
+            val scanner = adapter.bluetoothLeScanner ?: run {
+                _uiState.value = UiState.Error("BLE scanner not available")
+                return@launch
+            }
+            bleScanner = scanner
 
-                _uiState.value = UiState.Connecting
-                val manager = AudioTagBleManager(getApplication())
-                bleManager = manager
-
-                withContext(Dispatchers.IO) { manager.connect(device) }
-                Log.d(TAG, "Connected and services discovered")
-
-                withContext(Dispatchers.IO) {
-                    manager.sendAudio(pcmData) { chunkIndex, total ->
-                        _uiState.value = UiState.Sending(chunkIndex + 1, total)
+            val foundAddresses = mutableSetOf<String>()
+            activeScanCallback = AudioTagBleManager.startScan(
+                scanner,
+                onDeviceFound = { device ->
+                    // Each address triggers at most one connection attempt
+                    if (foundAddresses.add(device.address)) {
+                        connectWorker(device)
+                    }
+                },
+                onScanFailed = { code ->
+                    viewModelScope.launch {
+                        if (managers.isEmpty()) {
+                            _uiState.value = UiState.Error("BLE scan failed (error $code)")
+                        }
                     }
                 }
+            )
 
-                _uiState.value = UiState.WaitingForAck
-                withContext(Dispatchers.IO) { manager.waitForDone() }
+            // Scan for fixed duration then stop regardless of how many devices found
+            delay(SCAN_DURATION_MS)
+            stopScanning()
 
-                _uiState.value = UiState.Delivered
-                Log.d(TAG, "Audio delivered and acknowledged")
-
-            } catch (e: Exception) {
-                Log.e(TAG, "sendMessage failed", e)
-                _uiState.value = UiState.Error(e.message ?: "Unknown error")
-            } finally {
-                bleManager?.disconnect()
-                bleManager = null
+            // If still in Connecting and nothing connected, report error
+            if (_uiState.value is UiState.Connecting) {
+                _uiState.value = UiState.Error("No AudioTag devices found")
             }
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // Send text → device Flite TTS
-    // ---------------------------------------------------------------------------
-
-    @SuppressLint("MissingPermission")
-    fun sendTextToDevice(text: String) {
-        if (text.isBlank()) {
-            _uiState.value = UiState.Error("No text to send.")
-            return
-        }
-
-        viewModelScope.launch {
-            try {
-                _uiState.value = UiState.Scanning
-                val device = withContext(Dispatchers.IO) { scanForDevice() }
-
-                _uiState.value = UiState.Connecting
-                val manager = AudioTagBleManager(getApplication())
-                bleManager = manager
-
-                withContext(Dispatchers.IO) { manager.connect(device) }
-
-                _uiState.value = UiState.WaitingForAck
-                withContext(Dispatchers.IO) {
-                    manager.sendText(text)
-                    manager.waitForDone()
-                }
-
-                _uiState.value = UiState.Delivered
-                Log.d(TAG, "Text delivered to device: $text")
-
-            } catch (e: Exception) {
-                Log.e(TAG, "sendTextToDevice failed", e)
-                _uiState.value = UiState.Error(e.message ?: "Unknown error")
-            } finally {
-                bleManager?.disconnect()
-                bleManager = null
-            }
-        }
+    private fun stopScanning() {
+        val cb = activeScanCallback ?: return
+        activeScanCallback = null
+        bleScanner?.let { AudioTagBleManager.stopScan(it, cb) }
+        Log.d(TAG, "Scan stopped")
     }
 
     // ---------------------------------------------------------------------------
-    // PTT listen: connect, wait for mic audio, run STT
+    // Connect a single discovered worker device
     // ---------------------------------------------------------------------------
 
-    @SuppressLint("MissingPermission")
-    fun startListeningForPtt() {
+    private fun connectWorker(device: BluetoothDevice) {
+        val address = device.address
+        // Short human-readable label from the last 4 hex chars of the MAC address
+        val label = address.replace(":", "").takeLast(4).uppercase()
+
         viewModelScope.launch {
-            try {
-                _uiState.value = UiState.Scanning
-                val device = withContext(Dispatchers.IO) { scanForDevice() }
+            val manager = AudioTagBleManager(getApplication())
 
-                _uiState.value = UiState.Connecting
-                val manager = AudioTagBleManager(getApplication())
-                bleManager = manager
-
-                // Listen for status updates to reflect recording state in UI
-                manager.onStatusReceived = { statusByte ->
+            manager.onStatusReceived = { statusByte ->
+                viewModelScope.launch {
                     when (statusByte) {
-                        0x03.toByte() -> _uiState.value = UiState.RecordingOnDevice
-                        0x04.toByte() -> _uiState.value = UiState.ReceivingMicAudio
+                        0x03.toByte() -> updateWorkerStatus(address, "Recording…")
+                        0x04.toByte() -> updateWorkerStatus(address, "Sending audio…")
+                        0x02.toByte() -> updateWorkerStatus(address, "")
                     }
                 }
+            }
 
+            manager.onDisconnected = {
+                viewModelScope.launch {
+                    managers.remove(address)
+                    workerStatuses.remove(address)
+                    refreshDeviceStatus()
+                    if (managers.isEmpty()) _uiState.value = UiState.Disconnected
+                }
+            }
+
+            try {
                 withContext(Dispatchers.IO) { manager.connect(device) }
-                _uiState.value = UiState.WaitingForPtt
 
-                // Suspend until MIC_DATA notifications complete
-                val pcmData = withContext(Dispatchers.IO) {
-                    suspendCancellableCoroutine<ByteArray> { cont ->
-                        manager.onMicDataReceived = { data ->
-                            manager.onMicDataReceived = null
-                            if (cont.isActive) cont.resume(data)
-                        }
-                        cont.invokeOnCancellation {
-                            manager.onMicDataReceived = null
-                        }
-                    }
+                // Connection succeeded — register and transition to Connected
+                managers[address] = manager
+                workerStatuses[address] = ""
+                if (_uiState.value !is UiState.Connected) {
+                    _uiState.value = UiState.Connected(messages.toList())
                 }
-
-                Log.d(TAG, "Mic PCM received: ${pcmData.size} bytes — running STT")
-                _uiState.value = UiState.RecognizingSpeech
-
-                val transcript = withContext(Dispatchers.IO) {
-                    SttConverter().recognize(pcmData)
-                }
-
-                _uiState.value = if (transcript.isNotBlank()) {
-                    UiState.SpeechResult(transcript)
-                } else {
-                    UiState.Error("No speech recognized")
-                }
+                refreshDeviceStatus()
+                armMicCallback(manager, address, label)
+                Log.d(TAG, "Worker $label ($address) connected")
 
             } catch (e: Exception) {
-                Log.e(TAG, "startListeningForPtt failed", e)
-                _uiState.value = UiState.Error(e.message ?: "Unknown error")
-            } finally {
-                bleManager?.disconnect()
-                bleManager = null
+                Log.e(TAG, "connectWorker $address failed: ${e.message}")
+            }
+        }
+    }
+
+    // Re-arms itself after each delivery so subsequent PTT presses work automatically.
+    private fun armMicCallback(
+        manager: AudioTagBleManager,
+        address: String,
+        label: String
+    ) {
+        manager.onMicDataReceived = { pcmData ->
+            armMicCallback(manager, address, label)   // re-arm before async work
+            viewModelScope.launch {
+                updateWorkerStatus(address, "Recognizing speech…")
+                try {
+                    val transcript = SttConverter().recognize(pcmData, MIC_SAMPLE_RATE)
+                    if (transcript.isNotBlank()) {
+                        messages.add(Message(transcript, fromWorker = true, workerLabel = label))
+                        updateConnected { it.copy(messages = messages.toList()) }
+                        updateWorkerStatus(address, "")
+                    } else {
+                        updateWorkerStatus(address, "No speech recognized")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "STT failed", e)
+                    updateWorkerStatus(address, "STT error: ${e.message}")
+                }
             }
         }
     }
 
     // ---------------------------------------------------------------------------
-    // Local TTS test
+    // Send reply — broadcast to ALL connected workers simultaneously
     // ---------------------------------------------------------------------------
 
-    fun testLocally(text: String) {
-        if (text.isBlank()) {
-            _uiState.value = UiState.Error("Please enter a message to test.")
+    fun sendReply(text: String) {
+        if (text.isBlank()) return
+        val currentManagers = managers.values.toList()
+        if (currentManagers.isEmpty()) {
+            _uiState.value = UiState.Error("No workers connected")
             return
         }
+
         viewModelScope.launch {
             try {
-                _uiState.value = UiState.ConvertingTts
-                val pcmData = withContext(Dispatchers.IO) {
-                    ttsConverter.textToPcm(text)
+                if (usePhoneVoice.value) {
+                    val n = currentManagers.size
+                    updateConnected { it.copy(deviceStatus = "Converting…") }
+                    val pcmData = withContext(Dispatchers.IO) { ttsConverter.textToPcm(text) }
+                    updateConnected {
+                        it.copy(deviceStatus = "Sending to $n worker${if (n > 1) "s" else ""}…")
+                    }
+                    withContext(Dispatchers.IO) {
+                        coroutineScope {
+                            currentManagers.map { mgr ->
+                                async {
+                                    try {
+                                        mgr.sendAudio(pcmData) { _, _ -> }
+                                        mgr.waitForDone()
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "sendAudio to a worker failed", e)
+                                    }
+                                }
+                            }.awaitAll()
+                        }
+                    }
+                } else {
+                    val n = currentManagers.size
+                    updateConnected {
+                        it.copy(deviceStatus = "Sending to $n worker${if (n > 1) "s" else ""}…")
+                    }
+                    withContext(Dispatchers.IO) {
+                        coroutineScope {
+                            currentManagers.map { mgr ->
+                                async {
+                                    try {
+                                        mgr.sendText(text)
+                                        mgr.waitForDone()
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "sendText to a worker failed", e)
+                                    }
+                                }
+                            }.awaitAll()
+                        }
+                    }
                 }
-                Log.d(TAG, "Local test: PCM size ${pcmData.size} bytes")
+                messages.add(Message(text, fromWorker = false))
+                updateConnected { it.copy(messages = messages.toList()) }
+                refreshDeviceStatus()
 
-                _uiState.value = UiState.PlayingLocally
-                withContext(Dispatchers.IO) { playPcmOnSpeaker(pcmData) }
-                _uiState.value = UiState.Idle
             } catch (e: Exception) {
-                Log.e(TAG, "testLocally failed", e)
-                _uiState.value = UiState.Error(e.message ?: "Playback failed")
+                Log.e(TAG, "sendReply failed", e)
+                updateConnected { it.copy(deviceStatus = "Send failed: ${e.message}") }
             }
         }
     }
 
-    private suspend fun playPcmOnSpeaker(pcmData: ByteArray) {
-        val totalSamples = pcmData.size / 2
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(TtsConverter.TARGET_SAMPLE_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setBufferSizeInBytes(pcmData.size)
-            .setTransferMode(AudioTrack.MODE_STATIC)
-            .build()
+    // ---------------------------------------------------------------------------
+    // Disconnect all workers
+    // ---------------------------------------------------------------------------
 
-        suspendCancellableCoroutine { cont ->
-            track.setNotificationMarkerPosition(totalSamples)
-            track.setPlaybackPositionUpdateListener(object : AT.OnPlaybackPositionUpdateListener {
-                override fun onMarkerReached(t: AT) {
-                    t.release()
-                    if (cont.isActive) cont.resume(Unit)
-                }
-                override fun onPeriodicNotification(t: AT) {}
-            })
-            track.write(pcmData, 0, pcmData.size)
-            track.play()
-            cont.invokeOnCancellation { track.release() }
-        }
+    fun disconnect() {
+        stopScanning()
+        managers.values.forEach { it.disconnect() }
+        managers.clear()
+        workerStatuses.clear()
+        _uiState.value = UiState.Disconnected
     }
 
-    // ---------------------------------------------------------------------------
-    // Reset
-    // ---------------------------------------------------------------------------
-
-    fun reset() {
-        bleManager?.disconnect()
-        bleManager = null
-        _uiState.value = UiState.Idle
+    fun clearError() {
+        if (_uiState.value is UiState.Error) _uiState.value = UiState.Disconnected
     }
 
     override fun onCleared() {
         super.onCleared()
-        bleManager?.disconnect()
+        stopScanning()
+        managers.values.forEach { it.disconnect() }
+        managers.clear()
     }
 
     // ---------------------------------------------------------------------------
-    // BLE device scan helper
+    // Helpers
     // ---------------------------------------------------------------------------
 
-    @SuppressLint("MissingPermission")
-    private suspend fun scanForDevice(): android.bluetooth.BluetoothDevice {
-        val bluetoothManager =
-            getApplication<Application>().getSystemService(Context.BLUETOOTH_SERVICE)
-                    as BluetoothManager
-        val bluetoothAdapter = bluetoothManager.adapter
-            ?: throw IllegalStateException("Bluetooth is not available on this device")
+    private fun updateWorkerStatus(address: String, status: String) {
+        workerStatuses[address] = status
+        refreshDeviceStatus()
+    }
 
-        if (!bluetoothAdapter.isEnabled) {
-            throw IllegalStateException("Bluetooth is disabled. Please enable Bluetooth and try again.")
-        }
+    /** Recompute the deviceStatus string shown in the UI from all workers' states. */
+    private fun refreshDeviceStatus() {
+        val count = managers.size
+        val activeStatus = workerStatuses.values.firstOrNull { it.isNotBlank() }
+        val status = activeStatus
+            ?: if (count > 0) "$count worker${if (count > 1) "s" else ""} connected" else ""
+        updateConnected { it.copy(deviceStatus = status) }
+    }
 
-        val scanner = bluetoothAdapter.bluetoothLeScanner
-            ?: throw IllegalStateException("BLE scanner not available — is Bluetooth enabled?")
-
-        return suspendCancellableCoroutine { cont ->
-            val tempManager = AudioTagBleManager(getApplication())
-
-            tempManager.onError = { msg ->
-                if (cont.isActive) cont.resumeWithException(IllegalStateException(msg))
-            }
-
-            tempManager.scan(scanner) { device ->
-                if (cont.isActive) cont.resume(device)
-            }
-
-            cont.invokeOnCancellation {
-                // Scanner stopped by onDeviceFound callback; nothing extra needed here.
-            }
-        }
+    private fun updateConnected(update: (UiState.Connected) -> UiState.Connected) {
+        val current = _uiState.value
+        if (current is UiState.Connected) _uiState.value = update(current)
     }
 }

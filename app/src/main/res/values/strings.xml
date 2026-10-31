@@ -1,40 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">audio-tag-android</string>
-    <string name="app_name_display">AudioTag Messenger</string>
+    <string name="app_name_display">AudioTag</string>
 
-    <!-- Input -->
-    <string name="hint_message">Type your message…</string>
+    <!-- Connection -->
+    <string name="btn_connect">Scan for workers</string>
+    <string name="btn_disconnect">Disconnect</string>
+    <string name="btn_disconnect_all">Disconnect all</string>
+    <string name="status_disconnected">Not connected</string>
+    <string name="status_connecting">Scanning…</string>
+    <string name="status_connected">Connected</string>
 
-    <!-- Buttons -->
-    <string name="btn_send">Send via BLE</string>
-    <string name="btn_test_locally">Test Locally (Speaker)</string>
-    <string name="btn_listen">Listen for PTT</string>
-    <string name="btn_send_result">Send to Device</string>
-    <string name="btn_reset">Start Over</string>
+    <!-- Voice mode toggle -->
+    <string name="label_phone_voice">Phone voice (clear)</string>
+    <string name="label_device_voice">Device voice (Flite)</string>
 
-    <!-- Status messages -->
-    <string name="status_idle">Ready to send.</string>
-    <string name="status_converting">Converting text to audio…</string>
-    <string name="status_scanning">Scanning for AudioTag device…</string>
-    <string name="status_connecting">Connecting to AudioTag…</string>
-    <string name="status_sending">Sending audio… chunk %1$d of %2$d</string>
-    <string name="status_waiting_ack">Playing on device — waiting for confirmation…</string>
-    <string name="status_playing_locally">Playing on phone speaker…</string>
-    <string name="status_delivered">Audio delivered and played successfully!</string>
-    <!-- PTT states -->
-    <string name="status_waiting_ptt">Connected — press G41 on device to record…</string>
-    <string name="status_recording_device">Recording on device…</string>
-    <string name="status_receiving_mic">Receiving audio from device…</string>
-    <string name="status_recognizing">Recognizing speech…</string>
-    <string name="status_speech_done">Speech recognized!</string>
-    <!-- Speech result -->
-    <string name="label_speech_result">Recognized text:</string>
-    <!-- Error -->
-    <string name="status_error">Error: %1$s</string>
-
-    <!-- Validation -->
-    <string name="error_empty_message">Please enter a message.</string>
+    <!-- Chat input -->
+    <string name="hint_reply">Type a reply…</string>
+    <string name="btn_send">Send</string>
 
     <!-- Permissions -->
     <string name="perm_rationale_ble">Bluetooth permission is required to communicate with the AudioTag device.</string>

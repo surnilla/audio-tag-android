@@ -21,8 +21,11 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="30" />
 
-    <!-- Internet for Cloud STT -->
+    <!-- Internet for Cloud STT (kept for optional future use) -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required by some SpeechRecognizer backends even when using EXTRA_AUDIO_SOURCE -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- TTS requires writing to cache -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"

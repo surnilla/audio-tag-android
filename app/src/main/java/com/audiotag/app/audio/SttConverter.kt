@@ -1,81 +1,107 @@
 package com.audiotag.app.audio
 
-import android.util.Base64
 import android.util.Log
+import com.audiotag.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.TimeUnit
 
 class SttConverter {
 
     companion object {
         private const val TAG = "SttConverter"
 
-        // TODO: Replace with your Google Cloud Speech-to-Text API key.
-        // Create one at https://console.cloud.google.com/ → APIs → Cloud Speech-to-Text.
-        const val API_KEY = "YOUR_GOOGLE_CLOUD_STT_API_KEY"
+        // Key is read from local.properties (groq.api.key) → BuildConfig at build time.
+        // Never commit the key. Get a free key at https://console.groq.com
+        private val GROQ_API_KEY: String get() = BuildConfig.GROQ_API_KEY
 
-        private const val STT_ENDPOINT =
-            "https://speech.googleapis.com/v1/speech:recognize?key=$API_KEY"
+        private val client = OkHttpClient.Builder()
+            .callTimeout(30, TimeUnit.SECONDS)
+            .build()
     }
 
     /**
-     * Sends 16 kHz mono 16-bit little-endian PCM to Google Cloud Speech-to-Text
-     * and returns the transcript, or an empty string if no speech was detected.
-     *
-     * Must be called from a coroutine; does network I/O on [Dispatchers.IO].
+     * Transcribes mono 16-bit PCM via Groq Whisper API.
+     * Converts to WAV, posts to Groq, returns transcript.
      */
-    suspend fun recognize(pcmData: ByteArray): String = withContext(Dispatchers.IO) {
-        val encoded = Base64.encodeToString(pcmData, Base64.NO_WRAP)
-
-        val requestBody = JSONObject().apply {
-            put("config", JSONObject().apply {
-                put("encoding", "LINEAR16")
-                put("sampleRateHertz", TtsConverter.TARGET_SAMPLE_RATE)
-                put("languageCode", "en-US")
-                put("model", "command_and_search")
-            })
-            put("audio", JSONObject().apply {
-                put("content", encoded)
-            })
-        }.toString()
-
-        Log.d(TAG, "Sending ${pcmData.size} PCM bytes to Cloud STT")
-
-        val conn = URL(STT_ENDPOINT).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "POST"
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            conn.doOutput = true
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 30_000
-
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(requestBody) }
-
-            val responseCode = conn.responseCode
-            val responseText = if (responseCode == HttpURLConnection.HTTP_OK) {
-                conn.inputStream.bufferedReader(Charsets.UTF_8).readText()
-            } else {
-                val errText = conn.errorStream?.bufferedReader(Charsets.UTF_8)?.readText() ?: ""
-                Log.e(TAG, "Cloud STT HTTP $responseCode: $errText")
-                throw IllegalStateException("Cloud STT error $responseCode: $errText")
+    suspend fun recognize(pcmData: ByteArray, sampleRate: Int): String =
+        withContext(Dispatchers.IO) {
+            if (GROQ_API_KEY == "YOUR_GROQ_API_KEY_HERE") {
+                throw IllegalStateException("Set GROQ_API_KEY in SttConverter.kt")
             }
 
-            Log.d(TAG, "STT response: $responseText")
+            val wavData = buildWav(pcmData, sampleRate)
+            Log.d(TAG, "Sending ${wavData.size} bytes WAV (${pcmData.size / 2 / sampleRate}s) to Groq Whisper")
 
-            val json = JSONObject(responseText)
-            val results = json.optJSONArray("results")
-            if (results == null || results.length() == 0) return@withContext ""
+            val body = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("model", "whisper-large-v3-turbo")
+                .addFormDataPart(
+                    "file", "audio.wav",
+                    wavData.toRequestBody("audio/wav".toMediaType())
+                )
+                .addFormDataPart("language", "en")
+                .addFormDataPart("response_format", "json")
+                .build()
 
-            results.getJSONObject(0)
-                .getJSONArray("alternatives")
-                .getJSONObject(0)
-                .getString("transcript")
-        } finally {
-            conn.disconnect()
+            val request = Request.Builder()
+                .url("https://api.groq.com/openai/v1/audio/transcriptions")
+                .header("Authorization", "Bearer $GROQ_API_KEY")
+                .post(body)
+                .build()
+
+            val response = client.newCall(request).execute()
+            val responseBody = response.body?.string() ?: ""
+            Log.d(TAG, "Groq response ${response.code}: $responseBody")
+
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Groq API error ${response.code}: $responseBody")
+            }
+
+            JSONObject(responseBody).optString("text", "").trim()
         }
+
+    /** Wraps mono 16-bit PCM in a minimal WAV/RIFF container. */
+    private fun buildWav(pcm: ByteArray, sampleRate: Int): ByteArray {
+        val channels = 1
+        val bitsPerSample = 16
+        val byteRate = sampleRate * channels * bitsPerSample / 8
+        val blockAlign = channels * bitsPerSample / 8
+
+        val out = ByteArrayOutputStream(44 + pcm.size)
+        fun int32le(v: Int) {
+            val b = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
+            out.write(b)
+        }
+        fun int16le(v: Int) {
+            val b = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(v.toShort()).array()
+            out.write(b)
+        }
+
+        out.write("RIFF".toByteArray())
+        int32le(36 + pcm.size)
+        out.write("WAVE".toByteArray())
+        out.write("fmt ".toByteArray())
+        int32le(16)
+        int16le(1)              // PCM
+        int16le(channels)
+        int32le(sampleRate)
+        int32le(byteRate)
+        int16le(blockAlign)
+        int16le(bitsPerSample)
+        out.write("data".toByteArray())
+        int32le(pcm.size)
+        out.write(pcm)
+
+        return out.toByteArray()
     }
 }

@@ -19,6 +19,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.audiotag.app.databinding.ActivityMainBinding
+import com.google.android.material.chip.Chip
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -57,6 +58,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnSend.setOnClickListener { sendReply() }
+        binding.btnAlert.setOnClickListener { viewModel.triggerAlarm() }
 
         binding.etReply.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND) { sendReply(); true } else false
@@ -65,6 +67,12 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.uiState.collect { state -> render(state) }
+            }
+        }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.workers.collect { workers -> renderWorkers(workers) }
             }
         }
     }
@@ -88,6 +96,7 @@ class MainActivity : AppCompatActivity() {
                 binding.btnConnect.isEnabled = true
                 binding.btnSend.isEnabled = false
                 binding.tvDeviceStatus.isVisible = false
+                binding.btnAlert.isVisible = false
                 viewModel.clearError()
             }
 
@@ -98,6 +107,7 @@ class MainActivity : AppCompatActivity() {
                 binding.btnConnect.isEnabled = false
                 binding.btnSend.isEnabled = false
                 binding.tvDeviceStatus.isVisible = false
+                binding.btnAlert.isVisible = false
             }
 
             is UiState.Connected -> {
@@ -106,6 +116,7 @@ class MainActivity : AppCompatActivity() {
                 binding.btnConnect.text = getString(R.string.btn_disconnect_all)
                 binding.btnConnect.isEnabled = true
                 binding.btnSend.isEnabled = true
+                binding.btnAlert.isVisible = true
 
                 val status = state.deviceStatus
                 binding.tvDeviceStatus.isVisible = status.isNotBlank()
@@ -130,7 +141,52 @@ class MainActivity : AppCompatActivity() {
                 binding.btnConnect.isEnabled = true
                 binding.btnSend.isEnabled = false
                 binding.tvDeviceStatus.isVisible = false
+                binding.btnAlert.isVisible = false
             }
+        }
+    }
+
+    private fun renderWorkers(workers: List<WorkerInfo>) {
+        binding.workerScrollView.isVisible = workers.isNotEmpty()
+        binding.workerChipGroup.removeAllViews()
+        if (workers.isEmpty()) return
+
+        val selectedColor   = getColor(android.R.color.holo_green_dark)
+        val deselectedColor = getColor(android.R.color.darker_gray)
+        val whiteColor      = getColor(android.R.color.white)
+
+        fun styleChip(chip: Chip, selected: Boolean) {
+            chip.isCheckable = false   // we manage appearance manually
+            chip.setChipBackgroundColorResource(android.R.color.transparent)
+            if (selected) {
+                chip.chipStrokeWidth = 0f
+                chip.setChipBackgroundColor(android.content.res.ColorStateList.valueOf(selectedColor))
+                chip.setTextColor(whiteColor)
+            } else {
+                chip.chipStrokeWidth = 2f * resources.displayMetrics.density
+                chip.setChipBackgroundColor(android.content.res.ColorStateList.valueOf(getColor(android.R.color.transparent)))
+                chip.setTextColor(deselectedColor)
+                chip.chipStrokeColor = android.content.res.ColorStateList.valueOf(deselectedColor)
+            }
+        }
+
+        // "All" chip — selects all workers
+        val allSelected = workers.all { it.selected }
+        val allChip = Chip(this).apply {
+            text = "All"
+            styleChip(this, allSelected)
+            setOnClickListener { viewModel.selectAllWorkers() }
+        }
+        binding.workerChipGroup.addView(allChip)
+
+        // One chip per worker
+        workers.forEach { worker ->
+            val chip = Chip(this).apply {
+                text = worker.label
+                styleChip(this, worker.selected)
+                setOnClickListener { viewModel.toggleWorker(worker.address) }
+            }
+            binding.workerChipGroup.addView(chip)
         }
     }
 

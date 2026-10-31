@@ -19,6 +19,8 @@
     <string name="hint_reply">Type a reply…</string>
     <string name="btn_send">Send</string>
 
+    <string name="btn_test_alert">Test Alert</string>
+
     <!-- Permissions -->
     <string name="perm_rationale_ble">Bluetooth permission is required to communicate with the AudioTag device.</string>
     <string name="perm_rationale_location">Location permission is required for Bluetooth scanning on this Android version.</string>

@@ -31,6 +31,7 @@ class AudioTagBleManager(private val context: Context) {
         val TTS_UUID: UUID        = UUID.fromString("12345678-1234-1234-1234-1234567890AD")
         val STATUS_UUID: UUID     = UUID.fromString("12345678-1234-1234-1234-1234567890AE")
         val MIC_DATA_UUID: UUID   = UUID.fromString("12345678-1234-1234-1234-1234567890AF")
+        val ALARM_UUID: UUID      = UUID.fromString("12345678-1234-1234-1234-1234567890B0")
 
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
@@ -199,6 +200,15 @@ class AudioTagBleManager(private val context: Context) {
         val characteristic = service.getCharacteristic(TTS_UUID)
             ?: throw IllegalStateException("TTS characteristic not found")
         writeCharacteristic(g, characteristic, text.toByteArray(Charsets.UTF_8))
+    }
+
+    suspend fun sendAlarm() {
+        val g = gatt ?: throw IllegalStateException("Not connected")
+        val service = g.getService(SERVICE_UUID)
+            ?: throw IllegalStateException("AudioTag service not found")
+        val characteristic = service.getCharacteristic(ALARM_UUID)
+            ?: throw IllegalStateException("Alarm characteristic not found")
+        writeCharacteristic(g, characteristic, byteArrayOf(0x01))
     }
 
     // ---------------------------------------------------------------------------

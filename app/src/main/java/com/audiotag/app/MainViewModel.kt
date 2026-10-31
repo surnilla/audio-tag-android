@@ -27,6 +27,13 @@ import kotlinx.coroutines.withContext
 // null = message sent by the phone operator
 data class Message(val text: String, val fromWorker: Boolean, val workerLabel: String? = null)
 
+data class WorkerInfo(
+    val address: String,
+    val label: String,
+    val status: String = "",
+    val selected: Boolean = true
+)
+
 sealed class UiState {
     object Disconnected : UiState()
     object Connecting : UiState()
@@ -49,19 +56,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow<UiState>(UiState.Disconnected)
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
+    private val _workers = MutableStateFlow<List<WorkerInfo>>(emptyList())
+    val workers: StateFlow<List<WorkerInfo>> = _workers.asStateFlow()
+
     private val ttsConverter = TtsConverter(application)
     private val messages = mutableListOf<Message>()
 
     // Map of device address → manager for all currently connected workers
     private val managers = mutableMapOf<String, AudioTagBleManager>()
-    // Map of device address → current activity string (blank when idle)
-    private val workerStatuses = mutableMapOf<String, String>()
 
     private var activeScanCallback: ScanCallback? = null
     private var bleScanner: android.bluetooth.le.BluetoothLeScanner? = null
 
     // true = phone converts text to PCM; false = device Flite TTS
     val usePhoneVoice = MutableStateFlow(true)
+
+    fun toggleWorker(address: String) {
+        _workers.value = _workers.value.map {
+            if (it.address == address) it.copy(selected = !it.selected) else it
+        }
+    }
+
+    fun selectAllWorkers() {
+        _workers.value = _workers.value.map { it.copy(selected = true) }
+    }
 
     // ---------------------------------------------------------------------------
     // Connect — scan for SCAN_DURATION_MS, connect to every AudioTag found
@@ -149,7 +167,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             manager.onDisconnected = {
                 viewModelScope.launch {
                     managers.remove(address)
-                    workerStatuses.remove(address)
+                    _workers.value = _workers.value.filter { it.address != address }
                     refreshDeviceStatus()
                     if (managers.isEmpty()) _uiState.value = UiState.Disconnected
                 }
@@ -160,7 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Connection succeeded — register and transition to Connected
                 managers[address] = manager
-                workerStatuses[address] = ""
+                _workers.value = _workers.value + WorkerInfo(address, label)
                 if (_uiState.value !is UiState.Connected) {
                     _uiState.value = UiState.Connected(messages.toList())
                 }
@@ -207,7 +225,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendReply(text: String) {
         if (text.isBlank()) return
-        val currentManagers = managers.values.toList()
+        val currentManagers = _workers.value
+            .filter { it.selected }
+            .mapNotNull { managers[it.address] }
         if (currentManagers.isEmpty()) {
             _uiState.value = UiState.Error("No workers connected")
             return
@@ -267,6 +287,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun triggerAlarm() {
+        val currentManagers = _workers.value
+            .filter { it.selected }
+            .mapNotNull { managers[it.address] }
+        if (currentManagers.isEmpty()) {
+            _uiState.value = UiState.Error("No workers connected")
+            return
+        }
+        viewModelScope.launch {
+            updateConnected { it.copy(deviceStatus = "Sending alert…") }
+            withContext(Dispatchers.IO) {
+                coroutineScope {
+                    currentManagers.map { mgr ->
+                        async {
+                            try { mgr.sendAlarm() }
+                            catch (e: Exception) { Log.e(TAG, "sendAlarm failed", e) }
+                        }
+                    }.awaitAll()
+                }
+            }
+            refreshDeviceStatus()
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Disconnect all workers
     // ---------------------------------------------------------------------------
@@ -275,7 +319,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopScanning()
         managers.values.forEach { it.disconnect() }
         managers.clear()
-        workerStatuses.clear()
+        _workers.value = emptyList()
         _uiState.value = UiState.Disconnected
     }
 
@@ -288,6 +332,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopScanning()
         managers.values.forEach { it.disconnect() }
         managers.clear()
+        _workers.value = emptyList()
     }
 
     // ---------------------------------------------------------------------------
@@ -295,14 +340,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ---------------------------------------------------------------------------
 
     private fun updateWorkerStatus(address: String, status: String) {
-        workerStatuses[address] = status
+        _workers.value = _workers.value.map {
+            if (it.address == address) it.copy(status = status) else it
+        }
         refreshDeviceStatus()
     }
 
     /** Recompute the deviceStatus string shown in the UI from all workers' states. */
     private fun refreshDeviceStatus() {
-        val count = managers.size
-        val activeStatus = workerStatuses.values.firstOrNull { it.isNotBlank() }
+        val count = _workers.value.size
+        val activeStatus = _workers.value.firstOrNull { it.status.isNotBlank() }?.status
         val status = activeStatus
             ?: if (count > 0) "$count worker${if (count > 1) "s" else ""} connected" else ""
         updateConnected { it.copy(deviceStatus = status) }

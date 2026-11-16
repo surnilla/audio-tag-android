@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AudioTag</string>
-    <string name="app_name_display">AudioTag</string>
+    <string name="app_name">Talkie Tag</string>
+    <string name="app_name_display">Talkie Tag</string>
 
     <!-- Connection -->
     <string name="btn_connect">Scan for workers</string>

@@ -164,6 +164,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
+            manager.onReplyReceived = { text ->
+                viewModelScope.launch {
+                    messages.add(Message(text, fromWorker = true, workerLabel = label))
+                    updateConnected { it.copy(messages = messages.toList()) }
+                }
+            }
+
             manager.onDisconnected = {
                 viewModelScope.launch {
                     managers.remove(address)

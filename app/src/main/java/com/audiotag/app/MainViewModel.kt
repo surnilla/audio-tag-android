@@ -203,7 +203,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 updateWorkerStatus(address, "Recognizing speech…")
                 try {
-                    val transcript = SttConverter().recognize(pcmData, MIC_SAMPLE_RATE)
+                    val raw = SttConverter().recognize(pcmData, MIC_SAMPLE_RATE)
+                    // Strip trailing "over" command word (case-insensitive) the firmware recorded
+                    val transcript = raw.trimEnd()
+                        .replace(Regex("(?i)\\bover\\.?$"), "").trimEnd()
                     if (transcript.isNotBlank()) {
                         messages.add(Message(transcript, fromWorker = true, workerLabel = label))
                         updateConnected { it.copy(messages = messages.toList()) }

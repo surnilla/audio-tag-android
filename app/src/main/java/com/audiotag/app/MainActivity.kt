@@ -192,14 +192,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendMessage(msg: Message) {
         val tv = TextView(this).apply {
-            val senderLabel = if (msg.fromWorker) "Worker ${msg.workerLabel ?: ""}: " else "You: "
+            val tag = when {
+                !msg.fromWorker  -> ""
+                msg.isCommand    -> " [cmd]"
+                else             -> " [voice]"
+            }
+            val senderLabel = if (msg.fromWorker) "Worker ${msg.workerLabel ?: ""}$tag: " else "You: "
             text = "$senderLabel${msg.text}"
             textSize = 15f
             gravity = if (msg.fromWorker) Gravity.START else Gravity.END
-            setTextColor(
-                if (msg.fromWorker) getColor(android.R.color.black)
-                else getColor(android.R.color.holo_blue_dark)
-            )
+            setTextColor(when {
+                !msg.fromWorker -> getColor(android.R.color.holo_blue_dark)
+                msg.isCommand   -> getColor(android.R.color.holo_orange_dark)
+                else            -> getColor(android.R.color.black)
+            })
             val pad = (12 * resources.displayMetrics.density).toInt()
             val vertPad = (6 * resources.displayMetrics.density).toInt()
             setPadding(pad, vertPad, pad, vertPad)

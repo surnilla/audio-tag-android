@@ -25,7 +25,9 @@ import kotlinx.coroutines.withContext
 
 // workerLabel: short ID shown in the chat (last 4 hex chars of MAC, e.g. "A4B1")
 // null = message sent by the phone operator
-data class Message(val text: String, val fromWorker: Boolean, val workerLabel: String? = null)
+// isCommand = true  → recognised from the on-device 25-word command list (MultiNet6)
+// isCommand = false → transcribed from free speech via Groq Whisper STT
+data class Message(val text: String, val fromWorker: Boolean, val workerLabel: String? = null, val isCommand: Boolean = false)
 
 data class WorkerInfo(
     val address: String,
@@ -166,7 +168,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             manager.onReplyReceived = { text ->
                 viewModelScope.launch {
-                    messages.add(Message(text, fromWorker = true, workerLabel = label))
+                    messages.add(Message(text, fromWorker = true, workerLabel = label, isCommand = true))
                     updateConnected { it.copy(messages = messages.toList()) }
                 }
             }
